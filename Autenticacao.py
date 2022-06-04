@@ -11,8 +11,8 @@ import statistics
 #VARIÁVEIS GLOBAIS
 hostName = "localhost"
 serverPort = 3030
-maxEmbedding = 0.4
-minTotalAceito = 15
+maxEmbedding = 0.3
+minTotalAceito = 7
 limitParaTeste = 0 #pode-se definir um limite para o /teste, ou usar 0 para rodar em todo os registros do banco
 sessions = [0]
 sessions_para_teste = [0] #usado no /teste, o sistema irá pegar os dados destas sessões e irá comparar com o "sessions" logo acima
@@ -56,7 +56,7 @@ class MyServer(BaseHTTPRequestHandler):
                     client = pymongo.MongoClient("localhost", 27017)
                     db = client.Autenticacao2
                     authenticated = False
-                    totalOk = self.Calcular_embedding(db, subj_id, self.Calcular_avg_dados(arr_dados), True)        
+                    totalOk = self.Calcular_embedding(db, subj_id, self.Calcular_avg_dados(arr_dados), maxEmbedding, True)['totalOk']        
                     if totalOk:
                         authenticated = totalOk >= minTotalAceito
                     if authenticated:
@@ -109,6 +109,8 @@ class MyServer(BaseHTTPRequestHandler):
                 client = pymongo.MongoClient("localhost", 27017)
                 db = client.Autenticacao2
                 teste_automatizado = {}
+                totalTesteRR = 0
+                countRR = 0
                 for session in sessions_para_teste:
                     registros_subj_ids = db.Subj_Ids.find({'session': session})
                     subj_ids_session = next(registros_subj_ids, None)['subj_ids']
@@ -146,17 +148,30 @@ class MyServer(BaseHTTPRequestHandler):
                                 'Falsos positivos (subj_ids)': [],
                             }
                         
+                        menor_embedding = 99;
+                        menor_embedding_subj_id = 0;
                         for subj_id_teste in subj_ids_session:
                             s_subj_id_teste = str(subj_id_teste)
                             subj_id_key = 'Pegando os dados do ' + subj_id + '|' + _id + ' e tentando autenticar como se fosse o ' + s_subj_id_teste
-                            totalOk = self.Calcular_embedding(db, s_subj_id_teste, avg_dados, False)
+                            result = self.Calcular_embedding(db, s_subj_id_teste, avg_dados, maxEmbedding, False)
+                            totalOk = result['totalOk']
+                            #if subj_id == s_subj_id_teste:
+                            #    print(result)
                             if totalOk >= 0:
+                                if result['menor_embedding'] < menor_embedding:
+                                    menor_embedding = result['menor_embedding']
+                                    menor_embedding_subj_id = subj_id_teste
+                                    
                                 teste_automatizado[subj_id]['Testes realizados'] += 1
                                 if (totalOk >= minTotalAceito) and (s_subj_id_teste != subj_id):
                                     teste_automatizado[subj_id]['Falsos positivos'] += 1
                                     teste_automatizado[subj_id]['Falsos positivos (subj_ids)'].append(s_subj_id_teste + ', usando dados do _id ' + _id)
                                 if (totalOk < minTotalAceito) and (s_subj_id_teste == subj_id):
                                     teste_automatizado[subj_id]['Falsos negativos'] += 1
+                        
+                        totalTesteRR += 1
+                        if str(menor_embedding_subj_id) == subj_id:
+                            countRR += 1
                                 
                         #subj_id_candidatos = self.ObterSubjIdsCandidatos(db, [dados], False)
                         #teste_automatizado[subj_id_key] |= subj_id_candidatos[0]
@@ -169,15 +184,91 @@ class MyServer(BaseHTTPRequestHandler):
                     total_de_positivos += teste_automatizado[subj_id]['Falsos positivos']
                     total_de_negativos += teste_automatizado[subj_id]['Falsos negativos']                       
                     
+                total_autenticado = total_de_testes - total_de_positivos - total_de_negativos
+                
                 #MONTA A RESPOSTA, DIZENDO SE HÁ ALGUM SUBJ_ID CORRESPONDENTE AOS DADOS
                 response = '{"success": ' + str(not error)
                 response += ', "falsos positivos": "' + str(total_de_positivos / total_de_testes * 100) + '%"' 
                 response += ', "falsos negativos": "' + str(total_de_negativos / total_de_testes * 100) + '%"' 
                 response += ', "Verdadeiro positivos": "' + str(100 - (total_de_positivos / total_de_testes * 100)) + '%"'
                 response += ', "Verdadeiro Negativo": "' + str(100 - (total_de_negativos / total_de_testes * 100)) + '%"' 
+                response += ', "FAR": "' + str(total_de_positivos / total_autenticado * 100) + '%"' 
+                response += ', "FRR": "' + str(total_de_negativos / total_autenticado * 100) + '%"' 
+                response += ', "RR": "' + str(countRR / totalTesteRR * 100) + '%"' 
                 response += ', "resultados": ' + json.dumps(teste_automatizado)
                 response += ', "error": "' + error + '"'
                 response += '}'
+            #CHAMADA cadastro DO POSTMAN
+            elif self.path == '/testeEER':
+                client = pymongo.MongoClient("localhost", 27017)
+                db = client.Autenticacao2
+                for min_total_aceito in range(11, 15):
+                    teste_automatizado = {}
+                    for session in sessions_para_teste:
+                        registros_subj_ids = db.Subj_Ids.find({'session': session})
+                        subj_ids_session = next(registros_subj_ids, None)['subj_ids']
+                        subj_ids_session.sort() 
+                
+                        if limitParaTeste > 0:
+                            registros = db.Dados.find({'session': session}).limit(limitParaTeste)
+                            registros_len = limitParaTeste 
+                        else: 
+                            registros = db.Dados.find({'session': session})
+                            registros_len = db.Dados.count_documents({'session': session})
+                            
+                        registros_index = 0
+                        percent = 0
+                        for registro in registros: 
+                            registros_index += 1 
+                            perc = int(registros_index / registros_len * 100)
+                            if perc > percent:
+                                percent = perc
+                                print('Processando session ' + str(session) + ', min_total_aceito ' + str(min_total_aceito) + ': ' + str(percent) + '%')
+                            dados = registro.copy()
+                            subj_id = str(dados['subj_id'])
+                            del dados['_id']
+                            del dados['DataHora']
+                            del dados['session']
+                            del dados['subj_id']
+                            
+                            avg_dados = self.Calcular_avg_dados([dados]) 
+                            if not subj_id in teste_automatizado:
+                                teste_automatizado[subj_id] = {
+                                    'Testes realizados': 0,
+                                    'Falsos negativos': 0,
+                                    'Falsos positivos': 0,
+                                }
+                            
+                            for subj_id_teste in subj_ids_session:
+                                s_subj_id_teste = str(subj_id_teste)
+                                result = self.Calcular_embedding(db, s_subj_id_teste, avg_dados, maxEmbedding, False)
+                                totalOk = result['totalOk']
+                                if totalOk >= 0:
+                                    teste_automatizado[subj_id]['Testes realizados'] += 1
+                                    if (totalOk >= min_total_aceito) and (s_subj_id_teste != subj_id):
+                                        teste_automatizado[subj_id]['Falsos positivos'] += 1
+                                    if (totalOk < min_total_aceito) and (s_subj_id_teste == subj_id):
+                                        teste_automatizado[subj_id]['Falsos negativos'] += 1
+                        
+                    total_de_testes = 0
+                    total_de_positivos = 0
+                    total_de_negativos = 0
+                    for subj_id in teste_automatizado:
+                        total_de_testes += teste_automatizado[subj_id]['Testes realizados']
+                        total_de_positivos += teste_automatizado[subj_id]['Falsos positivos']
+                        total_de_negativos += teste_automatizado[subj_id]['Falsos negativos']                       
+                        
+                    total_autenticado = total_de_testes - total_de_positivos - total_de_negativos
+                    
+                    #MONTA A RESPOSTA, DIZENDO SE HÁ ALGUM SUBJ_ID CORRESPONDENTE AOS DADOS
+                    if len(response) > 0:
+                        response += ','
+                    response += '{"min_total_aceito": ' + str(min_total_aceito)
+                    response += ', "FAR": "' + str(total_de_positivos / total_autenticado * 100) + '%"' 
+                    response += ', "FRR": "' + str(total_de_negativos / total_autenticado * 100) + '%"' 
+                    response += '}'
+                
+                response = '{"results": [' + response + ']}'
                 
             #SE A PAGINA NAO FOR NEM auth NEM subj_id
             else:
@@ -215,7 +306,7 @@ class MyServer(BaseHTTPRequestHandler):
             subj_id_candidatos[index] = {}
             for subj_id_banco in self.subj_ids_banco:
                 #embedding = self.Calcular_embedding(db, subj_id, self.Calcular_avg_dados(arr_dados))
-                totalOk = self.Calcular_embedding(db, subj_id_banco, dados, print_info)
+                totalOk = self.Calcular_embedding(db, subj_id_banco, dados, maxEmbedding, print_info)['totalOk']
                 if totalOk >= minTotalAceito:
                     subj_id_candidatos[index] |= {'subj_id '+ subj_id_banco: 'passou em ' + str(totalOk) + ' registros'}
             
@@ -253,12 +344,13 @@ class MyServer(BaseHTTPRequestHandler):
         return avg_dados
         
     #CALCULA O EMBEDDING (DISTANCIA) DOS DADOS DO SUBJ_ID. 
-    def Calcular_embedding(self, db, subj_id, avg_dados, print_info):
+    def Calcular_embedding(self, db, subj_id, avg_dados, max_embedding, print_info):
         embeddings = []
         embeddingsOk = {}
         totalOk = 0
         total = 0
         index = 0
+        menor_embedding = 99;
         for session in sessions:
             registros = db.Dados.find({'session': session, 'subj_id': int(subj_id)}) 
             for registro in registros:  
@@ -269,23 +361,25 @@ class MyServer(BaseHTTPRequestHandler):
                 del dados['session']
                 del dados['subj_id']
                 embedding = math.dist(list(dados.values()), list(avg_dados.values()))
-                if embedding <= maxEmbedding:
+                if embedding <= max_embedding:
                     totalOk += 1
                     embeddingsOk[str(index)+'|'+_id] = embedding
                 
                 total += 1
                 index += 1
                 embeddings.append(embedding)
+                if ((embedding > 0) and (embedding < menor_embedding)):
+                    menor_embedding = embedding
             
         if embeddings:
             media_embedding = statistics.mean(embeddings)
             if print_info and totalOk > 0:
                 print('subj_id ' + str(subj_id) + ' passou em ' + str(totalOk) + ' de ' + str(total) + ' registros, com as seguintes distâncias: ' + str(embeddingsOk));
         
-            return totalOk
+            return {'totalOk': totalOk, 'media_embedding': media_embedding, 'menor_embedding': menor_embedding}
         else:
             #RETONA -1 SE NÃO EXISTIR NENHUM REGISTRO PARA O SUBJ_ID INFORMADO DENTRO DOS sessions
-            return -1
+            return {'totalOk': -1}
 
 #MÉTODO MAIN PARA INICIAR O SERVIDOR
 if __name__ == "__main__":        
